@@ -303,16 +303,18 @@ static int mm_valid_heap(void){
 
 static int checkCoalseceAndFree(void){
     char*  current = list_head;
-    int i
+    int i;
     for (i = 0; i < free_count; i++){
         if (GET_ALLOC(HEADER(current)) || GET_ALLOC(FOOTER(current))) {     /* if either the header or the footer are marked allocated */
             return 0;
         }
         if (NEXT_BLKP(current) !=0 && !GET_ALLOC(HEADER(NEXT_BLKP(current)))) {     /* if either the header or the footer are marked allocated */
-
-            return 0;
+            return 0;   /* If it has a next and is free */
         }
-
+        if (PREV_BLKP(current+SIZE_T_SIZE) !=0 && !GET_ALLOC(HEADER(PREV_BLKP(current)))) {     /* if either the header or the footer are marked allocated */
+            return 0;   /* If it has a previous and is free */
+        }
+        current = (char*)GET(current+SIZE_T_SIZE);
     }
     return 1;
 }
