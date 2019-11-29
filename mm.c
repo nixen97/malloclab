@@ -44,9 +44,39 @@ team_t team = {
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
 
-
+/* Basic constants and macros */
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+#define WSIZE   4       /* Word and header/footer size (bytes) */
+#define DSIZE   8       /* Double word size (bytes) */
+#define CHUNKSIZE (1<<2) /* Extend heap by this amount (bytes) */
 
+#define MAX(x, y) ((x) > (y)? (x) : (y))
+
+/* Pack a size and allocted bit into a word */
+#define PACK(size, alloc) ((size) | (alloc))
+
+/* Read and write a word at address p */
+#define GET(p)          (*(unsigned int *)(p))
+#define PUT(p, val)     (*(unsigned int *)(p) = (val))
+
+/* Read the size and allocated fields from address p */
+#define GET_SIZE(p)     (GET(p) & ~0x7)
+#define GET_ALLOC(p)    (GET(p) & 0x1)
+#define GET_ALIGN(p)    (GET(p) & 0x7)
+
+/* Given block ptr bp, compute address of its header and footer */
+#define HEADER(bp)        ((char *)(bp) - WSIZE)
+#define FOOTER(bp)        ((char *)(bp) + GETSIZE(HDRP(bp)) - DSIZE)
+
+/* Given block ptr bp, compute address of next and previous blocks */
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char * )(bp) - WSIZE)))
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
+
+/* Global variables */
+static char *heap_listp = 0;  /* Pointer to first block */
+char *list_head = 0; //list of free blocks
+char *epilogue_block = 0; /* Pointer to epilogue block */
+int free_count = 0; //# of free blocks 
 
 /* 
  * mm_init - initialize the malloc package.
