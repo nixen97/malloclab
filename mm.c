@@ -66,7 +66,7 @@ team_t team = {
 
 /* Given block ptr bp, compute address of its header and footer */
 #define HEADER(bp)        ((char *)(bp) - WSIZE)
-#define FOOTER(bp)        ((char *)(bp) + GETSIZE(HDRP(bp)) - DSIZE)
+#define FOOTER(bp)        ((char *)(bp) + GET_SIZE(HEADER(bp)) - DSIZE)
 
 /* Given block ptr bp, compute address of next and previous blocks */
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char * )(bp) - WSIZE)))
@@ -114,7 +114,8 @@ int mm_init(void)
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE,1));     /* Prologue footer */
     PUT(heap_listp + (3*WSIZE), PACK(0, 1));        /* Epilogue header */
     heap_listp += (2*WSIZE);
-
+    list_head = 0 ; /* Initialize global list of free blocks */
+    free_count = 0; /* Initialize free blocks count */
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
@@ -301,6 +302,18 @@ static int mm_valid_heap(void){
 }
 
 static int checkCoalseceAndFree(void){
+    char*  current = list_head;
+    int i
+    for (i = 0; i < free_count; i++){
+        if (GET_ALLOC(HEADER(current)) || GET_ALLOC(FOOTER(current))) {     /* if either the header or the footer are marked allocated */
+            return 0;
+        }
+        if (NEXT_BLKP(current) !=0 && !GET_ALLOC(HEADER(NEXT_BLKP(current)))) {     /* if either the header or the footer are marked allocated */
+
+            return 0;
+        }
+
+    }
     return 1;
 }
 
