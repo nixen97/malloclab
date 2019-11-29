@@ -86,18 +86,31 @@ int free_count = 0; //# of free blocks
  */
 int mm_init(void)
 {
-    // Get enough space to store the root header
-    // The root header will contain a pointer to start the explicit free list
-    // And a zero size, to be consistent in coalescing checks
-    // Slightly wasteful in memory, but we avoid having to do any special checks in free
-    // 8 is hardcoded because we assume 32-bit
-    void *root = mem_sbrk(ALIGN(REGSIZE));
+/*    // Get enough space to store the root header*/
+    /*// The root header will contain a pointer to start the explicit free list*/
+    /*// And a zero size, to be consistent in coalescing checks*/
+    /*// Slightly wasteful in memory, but we avoid having to do any special checks in free*/
+    /*// 8 is hardcoded because we assume 32-bit*/
+    /*void *root = mem_sbrk(ALIGN(REGSIZE));*/
 
-    // This will point to the next free block
-    // And will be NULL if we don't have any
-    root = NULL;
+    /*// This will point to the next free block*/
+    /*// And will be NULL if we don't have any*/
+    /*root = NULL;*/
 
-    return 0;
+    /*return 0;*/
+ /* Create the initial empty heap */
+    if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
+        return -1;
+    PUT(heap_listp, 0);                             /* Alignmennt padding */
+    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));    /* Prologue hader */
+    PUT(heap_listp + (2*WSIZE), PACK(DSIZE,1));     /* Prologue footer */
+    PUT(heap_listp + (3*WSIZE), PACK(0, 1));        /* Epilogue header */
+    heap_listp += (2*WSIZE);
+
+    /* Extend the empty heap with a free block of CHUNKSIZE bytes */
+    if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
+        return -1;
+    return 0;e
 }
 
 /* 
@@ -231,8 +244,25 @@ void *mm_realloc(void *ptr, size_t size)
     return newptr;
 }
 
+static int mm_checker(void)
+{
+    if (checkCoalseceAndFree() == 0){
+        return 0;
+    }
+    if (checkFreeInList() == 0){
+        return 0;
+    }
+    if (checkOverlap() == 0){
+        return 0;
+    }
+    if (mm_valid_heap() == 0){
+        return 0;
+    }
+}
 
-
+static int mm_valid_heap(void){
+    char *heap_check;
+    for (heap_check = NEXT_BLKP(heap_listp)
 
 
 
