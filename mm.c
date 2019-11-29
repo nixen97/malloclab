@@ -78,6 +78,14 @@ char *list_head = 0; //list of free blocks
 char *epilogue_block = 0; /* Pointer to epilogue block */
 int free_count = 0; //# of free blocks 
 
+/* Prototypes for helper methods */
+static void *extend_heap(size_t words);
+static int mm_checker(void);
+static int checkFreeInList(void);
+static int checkOverlap(void);
+static int checkCoalseceAndFree(void);
+static int mm_valid_heap(void);
+
 /* 
  * mm_init - initialize the malloc package.
  * Initializes with a global root header,
@@ -110,8 +118,28 @@ int mm_init(void)
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
         return -1;
-    return 0;e
+    return 0;
 }
+
+static void *extend_heap(size_t words)
+{
+    char *bp;
+    size_t size;
+
+    /* Allocate an evenn number of words to maintain alignment */
+    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
+    if ((long)(bp = mem_sbrk(size)) == -1)
+        return NULL;
+
+    /* Initialize free block header/footer and the epilogue header */
+    PUT(HDRP(bp), PACK(size, 0));       /* Free block header */
+    PUT(FTRP(bp), PACK(size, 0));       /* Free block footer */
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* New epilogue header */
+
+    /* Coalesce if the previous block was free */
+    return coalesce(bp);
+}
+
 
 /* 
  * mm_malloc - Allocate a block by incrementing the brk pointer.
@@ -258,11 +286,32 @@ static int mm_checker(void)
     if (mm_valid_heap() == 0){
         return 0;
     }
+    return 1;
 }
 
 static int mm_valid_heap(void){
     char *heap_check;
-    for (heap_check = NEXT_BLKP(heap_listp)
+    for (heap_check = NEXT_BLKP(heap_listp); heap_check < epilogue_block; heap_check = NEXT_BLKP(heap_check)) {
+        if((HEADER(heap_check) < HEADER(NEXT_BLKP(heap_listp))) || ((char *)GET(HEADER(heap_check)) > epilogue_block) ||  (GET_ALIGN(HEADER(heap_check)) != 0)) {
+            printf("Error: current block points to an invalid heap address: %p\n", heap_check);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int checkCoalseceAndFree(void){
+    return 1;
+}
+
+static int checkOverlap(void){
+    return 1;
+}
+
+static int checkFreeInList(void){
+    return 1;
+}
+
 
 
 
