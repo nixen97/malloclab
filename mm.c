@@ -61,13 +61,11 @@ int mm_init(void)
     // And a zero size, to be consistent in coalescing checks
     // Slightly wasteful in memory, but we avoid having to do any special checks in free
     // 8 is hardcoded because we assume 32-bit
-    void *root = mem_sbrk(REGSIZE + SIZE_T_SIZE);
+    void *root = mem_sbrk(ALIGN(REGSIZE));
 
     // This will point to the next free block
     // And will be NULL if we don't have any
     root = NULL;
-    size_t *size_ptr = (size_t*)((char*)root + REGSIZE);
-    *size_ptr = 0;
 
     return 0;
 }
@@ -145,7 +143,7 @@ void mm_free(void *ptr)
     // Coalesce
     // Let us check before the current block
     size_t *prev_foot = (size_t*)((char*)header - SIZE_T_SIZE); 
-    if (*prev_foot & 1 == 1)
+    if ((void*)prev_foot > mem_heap_lo() && (*prev_foot & 1) == 1)
     {
         // free bit is set, let's do coalescing
         // Calculate new size
@@ -168,7 +166,7 @@ void mm_free(void *ptr)
     size_t *next_head = (size_t*)((char*)footer + SIZE_T_SIZE);
     
     // We have no global footer so we need to use a call to mem in order to check if we are oob.
-    if (next_head < mem_heap_hi() && *next_head & 1 == 1)
+    if ((void*)next_head < mem_heap_hi() && (*next_head & 1) == 1)
     {
         // Coalesce, same as before
         size_t new_size = ((*header & BITMASK) + (*next_head & BITMASK) + 2 * SIZE_T_SIZE) | 1;
