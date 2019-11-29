@@ -39,7 +39,7 @@ team_t team = {
 #define ALIGNMENT 8
 
 #define REGSIZE 8
-#define BITMASK 65534
+#define BITMASK ~1
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
@@ -73,6 +73,7 @@ team_t team = {
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /* Global variables */
+// TODO: We may not need these
 static char *heap_listp = 0;  /* Pointer to first block */
 char *list_head = 0; //list of free blocks
 char *epilogue_block = 0; /* Pointer to epilogue block */
@@ -148,21 +149,78 @@ static void *extend_heap(size_t words)
  */
 void *mm_malloc(size_t size)
 {   
-    printf("===== Now mallocing =====\n");
-    printf("Malloc called with size %d\n", size);
+    // printf("===== Now mallocing =====\n");
+    // printf("Malloc called with size %d\n", size);
     // The space required + two aligned sizes for header and footer
-    int newsize = ALIGN(size);
-    int sizewheaders = newsize + 2 * SIZE_T_SIZE;
+    size_t newsize = ALIGN(size);
 
-    printf("New size without headers = %d\n", newsize);
-    printf("New size with headers = %d\n", sizewheaders);
+    // Ensure that we have enough space to store the list pointers when freed
+    if (newsize < 8)
+        newsize = 8;
 
-    // Implement best-fit free checking here
+    size_t sizewheaders = newsize + 2 * SIZE_T_SIZE;
 
+    // printf("New size without headers = %d\n", newsize);
+    // printf("New size with headers = %d\n", sizewheaders);
 
+    // Best fit allocation
+    size_t best_diff = __INT_MAX__;
+    void *best_ptr = NULL;
 
+    // Check every free block
+    void **current = mem_heap_lo();
+    // Skip root
+    current = *current;
+    while (current != NULL)
+    {
+        // Get the size of the current free block
+        size_t this_size = (*(size_t*)((char*)current - (SIZE_T_SIZE + 4))) & BITMASK;
+        
+        // If it is large enough check if it is better than current best fit
+        if (newsize < this_size && (this_size - newsize) < best_diff)
+        {
+            best_diff = this_size - newsize;
+            best_ptr = (void*)((char*)current - 4);
+        }
+        current = *current;
+    }
 
-    printf("Allocating new memory region\n");
+    // If we found any suitable block, use it
+    if (best_ptr != NULL)
+    {
+        if (best_diff > 32)
+        {
+            // If there is enough left over after this block to make another block perform a split
+
+        }
+
+        // Splice the list
+        // For an explaination see mm_free
+        void **prev_ptr = best_ptr;
+        void **next_ptr = prev_ptr + 1;
+
+        void **block1_prev = *prev_ptr;
+        void **block1_next;
+        if (block1_prev == mem_heap_lo())
+            block1_next = block1_prev;
+        else
+            block1_next = block1_prev + 1;
+
+        void **block2_next = *next_ptr;
+        void **block2_prev = *next_ptr - 1;
+        
+        *block1_next = block2_next;
+        if (*next_ptr != NULL)
+            *block2_prev = block1_prev;
+
+        size_t *header = (size_t*)((char*)best_ptr - SIZE_T_SIZE);
+        *header = (*header & BITMASK);
+        size_t *footer = (size_t*)((char*)header + *header + SIZE_T_SIZE);
+        *footer = (*header & BITMASK);
+
+        return best_ptr;
+    }
+
     // Get the new memory
     void *p = mem_sbrk(sizewheaders);
 
@@ -177,18 +235,6 @@ void *mm_malloc(size_t size)
     size_t *f = (size_t*)((char*)p + newsize + SIZE_T_SIZE);
     *f = newsize;
 
-    void *temp = p;
-
-    printf("--- Header ---\nsize: %d\n--- Header ---\n", *(size_t*)temp);
-
-    for (int i = 0; i < newsize; i++)
-    {
-      temp = (unsigned char*)p + SIZE_T_SIZE + i;
-      printf("%d => %0d\n", i+1, *((unsigned char*)temp));
-    }
-    temp++;
-    printf("--- Footer ---\nsize: %d\n--- Footer ---\n", *(size_t*)temp);
-
     return (void *)((char *)p + SIZE_T_SIZE);
 }
 
@@ -196,21 +242,19 @@ void *mm_malloc(size_t size)
  * mm_free - Freeing a block does nothing.
  */
 void mm_free(void *ptr)
-{
-    // Get header and footer
+{// Get header and footer
     size_t *header = (size_t*)((char*)ptr - SIZE_T_SIZE);
     size_t *footer = (size_t*)((char*)ptr + *header);
 
-    printf("===== Now freeing =====\n");
-    printf("H: %d : F: %d\n", *header, *footer);
+    if ((*header & 1) == 1)
+        // This block is already free
+        return;
 
     // Set free flag in header
     // We store this in the bottom bit of the size
     // We can do this because the aligment ensures it is always 0.
     *header = *header | 1;
     *footer = *footer | 1;
-
-    printf("H: %d : F: %d\n", *header, *footer);
 
     // Coalesce
     // Let us check before the current block
@@ -225,7 +269,33 @@ void mm_free(void *ptr)
         size_t new_size = ((*header & BITMASK) + (*prev_foot & BITMASK) + 2 * SIZE_T_SIZE) | 1;
 
         // We then need to set header to the other blocks header
-        header = (size_t*)((char*)prev_foot - *prev_foot - SIZE_T_SIZE);
+        header = (size_t*)((char*)prev_foot - ((*prev_foot & BITMASK) + SIZE_T_SIZE));
+
+        // We need to splice the free list for the block we just consumed
+        // Pointer to previous's prev_ptr
+        void **prev_ptr = (void*)((char*)header + SIZE_T_SIZE);
+        // Pointer to nexts next_ptr
+        void **next_ptr = prev_ptr + 1;
+
+        // Find the block before this
+        void **block1_prev = *prev_ptr;
+        // If we are at the root node, there is no prev_ptr, account for this
+        void **block1_next;
+        if (block1_prev == mem_heap_lo())
+            block1_next = block1_prev;
+        else
+            block1_next = block1_prev + 1;
+
+        // The block after this
+        // next_ptr can point to 0; Then these won't be valid adresses
+        void **block2_next = *next_ptr;
+        void **block2_prev = block2_next - 1;
+
+        // Point block 1 to block 2
+        *block1_next = block2_next;
+        // Only point backwards if block2 is a real block
+        if (*next_ptr != NULL)
+            *block2_prev = block1_prev;
 
         // We then set header and footer to the new size
         // At this point the unused header and footer is still insize our new block.
@@ -243,14 +313,41 @@ void mm_free(void *ptr)
         // Coalesce, same as before
         size_t new_size = ((*header & BITMASK) + (*next_head & BITMASK) + 2 * SIZE_T_SIZE) | 1;
 
-        footer = (size_t*)((char*)next_head + *next_head - SIZE_T_SIZE);
+        footer = (size_t*)((char*)next_head + (*next_head & BITMASK) - SIZE_T_SIZE);
+
+        void **prev_ptr = (void*)((char*)next_head + SIZE_T_SIZE);
+        // Pointer to nexts next_ptr
+        void **next_ptr = prev_ptr + 1;
+
+        void **block1_prev = *prev_ptr;
+        void **block1_next;
+        if (block1_prev == mem_heap_lo())
+            block1_next = block1_prev;
+        else
+            block1_next = block1_prev + 1;
+
+        void **block2_next = *next_ptr;
+        void **block2_prev = *next_ptr - 1;
+
+        *block1_next = block2_next;
+        
+        if (*next_ptr != NULL)
+            *block2_prev = block1_prev;
 
         *header = new_size;
         *footer = new_size;
     }
 
-    // Set up the pointers in the old body to build the explicit free list
+    // Add ourselves to the top of the list
+    // Get the spot for our ptrs
+    void **prev_ptr = (void*)((char*)header + SIZE_T_SIZE);
+    void **next_ptr = prev_ptr + 1;
 
+    void **root = mem_heap_lo();
+
+    *next_ptr = *root;
+    *prev_ptr = root;
+    *root = next_ptr;
 }
 
 /*
