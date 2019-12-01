@@ -14,8 +14,12 @@
  * Studies suggests that this leads to slightly more fragmentation then address ordered, but is much
  * more trivial to implement.
  * 
- * The implementation used both headers and footers, consisting of a size_t size, with a free flag stored in the least significant bit.
+ * The free list is terminated by a NULL ptr.
+ * 
+ * The implementation uses both headers and footers, consisting of a size_t size, with a free flag stored in the least significant bit.
  * This makes coalescing easy.
+ * 
+ * There is no global header and footer (except the root pointer) and out-of-bounds checks are implemented using mem_heap_lo() and mem_heap_hi().
  * 
  */
 #include <stdio.h>
@@ -49,6 +53,7 @@ team_t team = {
 
 /* Size of a register (eip specifically), in this case 32-bit */
 #define REGSIZE 4
+
 /* A bitmask for filtering out the free bit (stored in the least significant bit) */
 #define BITMASK ~1
 
@@ -59,10 +64,7 @@ team_t team = {
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 /* Prototypes for helper methods related to mm_check*/
-static int mm_check(void);
-static int checkFreeInList(void);
-static int checkOverlap(void);
-static int checkCoalseceAndFree(void);
+int mm_check(void);
 static int mm_valid_heap(void);
 static int check_inv_list(void);
 
@@ -75,8 +77,11 @@ static void splice_list(void **prev_ptr, void **next_ptr);
 static size_t* coalesce(size_t *header, size_t *footer);
 static void FL_push_front(size_t *header);
 
-
-
+/*
+ * ========================================================
+ *               User facing functions of mm.c
+ * ========================================================
+ */
 
 
 /* 
@@ -87,7 +92,6 @@ static void FL_push_front(size_t *header);
  */
 int mm_init(void)
 {
-    // printf("Init called\n");
     // Should be done for us, but let us do it anyway
     mem_reset_brk();
     
@@ -580,18 +584,8 @@ static void FL_push_front(size_t *header)
  */
 
 
-static int mm_check(void)
+int mm_check(void)
 {
-    printf("Checking!\n");
-    if (checkCoalseceAndFree() == 0){
-        return 0;
-    }
-    if (checkFreeInList() == 0){
-        return 0;
-    }
-    if (checkOverlap() == 0){
-        return 0;
-    }
     if (mm_valid_heap() == 0){
         return 0;
     }
@@ -601,40 +595,47 @@ static int mm_check(void)
     return 1;
 }
 
+/*
+ * mm_valid_heap - Goes through each block and ensures that size is aligned correctly.
+ * Will also check as there aren't two free blocks next to eachother.
+ * 
+ * If the size in the header is not correct, it will likely lead to a SEGFAULT.
+ * This is not checked explicitly though.
+ */
 static int mm_valid_heap(void){
-    // char *heap_check;
-    // for (heap_check = NEXT_BLKP(heap_listp); heap_check < epilogue_block; heap_check = NEXT_BLKP(heap_check)) {
-    //     if((HEADER(heap_check) < HEADER(NEXT_BLKP(heap_listp))) || ((char *)GET(HEADER(heap_check)) > epilogue_block) ||  (GET_ALIGN(HEADER(heap_check)) != 0)) {
-    //         printf("Error: current block points to an invalid heap address: %p\n", heap_check);
-    //         return 0;
-    //     }
-    // }
-    return 1;
-}
+    // Pointer to first header
+    char *ptr = (char*)mem_heap_lo() + 8;
 
-static int checkCoalseceAndFree(void){
-    // char*  current = list_head;
-    // int i;
-    // for (i = 0; i < free_count; i++){
-    //     if (GET_ALLOC(HEADER(current)) || GET_ALLOC(FOOTER(current))) {     /* if either the header or the footer are marked allocated */
-    //         return 0;
-    //     }
-    //     if (NEXT_BLKP(current) !=0 && !GET_ALLOC(HEADER(NEXT_BLKP(current)))) {     /* if either the header or the footer are marked allocated */
-    //         return 0;   /* If it has a next and is free */
-    //     }
-    //     if (PREV_BLKP(current+SIZE_T_SIZE) !=0 && !GET_ALLOC(HEADER(PREV_BLKP(current)))) {     /* if either the header or the footer are marked allocated */
-    //         return 0;   /* If it has a previous and is free */
-    //     }
-    //     current = (char*)GET(current+SIZE_T_SIZE);
-    // }
-    return 1;
-}
+    // Keep track of whether the last block was free
+    int lastFree = 0;
 
-static int checkOverlap(void){
-    return 1;
-}
+    // For storing the size of the blocks
+    size_t size;
+    
+    // Keep looping until we run out of heap
+    while (ptr < (char*)mem_heap_hi())
+    {
+        // Get the size. Free bit preserved
+        size = *(size_t*)ptr;
 
-static int checkFreeInList(void){
+        // Check if this block and last block were both free
+        if (lastFree == 1 && lastFree == (size & 1))
+            printf("TWO ADJACENT FREE BLOCKS AT SIZES %d and %d\n", *(size_t*)(ptr-SIZE_T_SIZE), size);
+        
+        // Store the free bit of this block for next round
+        lastFree = (size & 1);
+
+        // Get footer
+        ptr = ptr + SIZE_T_SIZE + (size & BITMASK);
+
+        // Check that size in header and footer are identical
+        if (*(size_t*)ptr != size)
+            printf("INCONSISTENT SIZE IN HEADER AND FOOTER AT FOOTER %p\n", ptr);
+
+        // Go to next header for next round
+        ptr = ptr + SIZE_T_SIZE;
+    }
+    
     return 1;
 }
 
