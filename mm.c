@@ -38,7 +38,7 @@ team_t team = {
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
 
-#define REGSIZE 8
+#define REGSIZE 4
 #define BITMASK ~1
 
 /* rounds up to the nearest multiple of ALIGNMENT */
@@ -80,12 +80,76 @@ char *epilogue_block = 0; /* Pointer to epilogue block */
 int free_count = 0; //# of free blocks 
 
 /* Prototypes for helper methods */
-static void *extend_heap(size_t words);
+// static void *extend_heap(size_t words);
 static int mm_checker(void);
 static int checkFreeInList(void);
 static int checkOverlap(void);
 static int checkCoalseceAndFree(void);
 static int mm_valid_heap(void);
+
+static void* alloc_new_block(size_t newsize);
+static void* look_for_free_block(size_t newsize);
+static void* alloc_free_block(void *best_ptr, size_t newsize);
+static void* split_free_block(size_t *header, size_t newsize);
+static void splice_list(void **prev_ptr, void **next_ptr);
+static size_t* coalesce(size_t *header, size_t *footer);
+static void FL_push_front(size_t *header);
+
+static void check_inv_list();
+static void printfreelist()
+{
+    void **node = mem_heap_lo();
+    int index = 0;
+    printf("%p ", node);
+    while (*node != NULL)
+    {
+        node = *node;
+        printf(" => %p", node);
+        index++;
+        if (index > 32)
+            break;
+    }
+
+    // backwards
+    node = (void*)((char*)node - 4);
+    printf(" == %p", node);
+    index = 0;
+    while ((void*)node > mem_heap_lo())
+    {
+        node = *node;
+        printf(" => %p", node);
+        index++;
+        if (index > 32)
+            break;
+    }
+
+    printf("\n");
+    check_inv_list();
+}
+
+static void check_inv_list()
+{
+    void **node = mem_heap_lo();
+    int index = 0;
+    node = *node;
+    if (node == NULL) return;
+    while (*node != NULL)
+    {
+        void **next = *node;
+        void **next_prev = (void*)((char*)next - 4);
+        void **back_prev = *next_prev;
+        void **back_again = (void*)((char*)back_prev + 4);
+
+        if (node != back_again)
+            printf("ERROR IN REV CHAIN %p => %p : %p => %p : %p\n", node, next_prev, next, back_prev, back_again);
+
+        node = *node;
+        index++;
+        if (index > 1024)
+            break;
+    }
+}
+
 
 /* 
  * mm_init - initialize the malloc package.
@@ -95,52 +159,20 @@ static int mm_valid_heap(void);
  */
 int mm_init(void)
 {
+    printf("Init called\n");
+    // Should be done for us, but let us do it anyway
+    mem_reset_brk();
+    
     // Get enough space to store the root header
     // The root header will contain a pointer to start the explicit free list
-    // And a zero size, to be consistent in coalescing checks
-    // Slightly wasteful in memory, but we avoid having to do any special checks in free
-    // 8 is hardcoded because we assume 32-bit
-    void *root = mem_sbrk(ALIGN(REGSIZE));
+    void **root = mem_sbrk(ALIGN(REGSIZE));
+
     // This will point to the next free block
     // And will be NULL if we don't have any
-    root = NULL;
-
+    *root = NULL;
+    
     return 0;
- /* Create the initial empty heap */
-    // if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1)
-    //     return -1;
-    // PUT(heap_listp, 0);                             /* Alignmennt padding */
-    // PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1));    /* Prologue hader */
-    // PUT(heap_listp + (2*WSIZE), PACK(DSIZE,1));     /* Prologue footer */
-    // PUT(heap_listp + (3*WSIZE), PACK(0, 1));        /* Epilogue header */
-    // heap_listp += (2*WSIZE);
-    // list_head = 0 ; /* Initialize global list of free blocks */
-    // free_count = 0; /* Initialize free blocks count */
-    // /* Extend the empty heap with a free block of CHUNKSIZE bytes */
-    // if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
-    //     return -1;
-    // return 0;
 }
-
-static void *extend_heap(size_t words)
-{
-    char *bp;
-    size_t size;
-
-    /* Allocate an evenn number of words to maintain alignment */
-    size = (words % 2) ? (words+1) * WSIZE : words * WSIZE;
-    if ((long)(bp = mem_sbrk(size)) == -1)
-        return NULL;
-
-    /* Initialize free block header/footer and the epilogue header */
-    PUT(HEADER(bp), PACK(size, 0));       /* Free block header */
-    PUT(FOOTER(bp), PACK(size, 0));       /* Free block footer */
-    PUT(HEADER(NEXT_BLKP(bp)), PACK(0, 1)); /* New epilogue header */
-
-    /* Coalesce if the previous block was free */
-    return coalesce(bp);
-}
-
 
 /* 
  * mm_malloc - Allocate a block by incrementing the brk pointer.
@@ -148,8 +180,7 @@ static void *extend_heap(size_t words)
  */
 void *mm_malloc(size_t size)
 {   
-    // printf("===== Now mallocing =====\n");
-    // printf("Malloc called with size %d\n", size);
+    printf("malloc called : %d\n", size);
     // The space required + two aligned sizes for header and footer
     size_t newsize = ALIGN(size);
 
@@ -157,96 +188,34 @@ void *mm_malloc(size_t size)
     if (newsize < 8)
         newsize = 8;
 
-    size_t sizewheaders = newsize + 2 * SIZE_T_SIZE;
-
-    // printf("New size without headers = %d\n", newsize);
-    // printf("New size with headers = %d\n", sizewheaders);
-
-    // Best fit allocation
-    size_t best_diff = __INT_MAX__;
-    void *best_ptr = NULL;
 
     // Check every free block
-    void **current = mem_heap_lo();
-    // Skip root
-    current = *current;
-    while (current != NULL)
-    {
-        // Get the size of the current free block
-        size_t this_size = (*(size_t*)((char*)current - (SIZE_T_SIZE + 4))) & BITMASK;
-        
-        // If it is large enough check if it is better than current best fit
-        if (newsize < this_size && (this_size - newsize) < best_diff)
-        {
-            best_diff = this_size - newsize;
-            best_ptr = (void*)((char*)current - 4);
-        }
-        current = *current;
-    }
+    void *best_ptr = look_for_free_block(newsize);
 
     // If we found any suitable block, use it
     if (best_ptr != NULL)
     {
-        if (best_diff > 32)
-        {
-            // If there is enough left over after this block to make another block perform a split
-
-        }
-
-        // Splice the list
-        // For an explaination see mm_free
-        void **prev_ptr = best_ptr;
-        void **next_ptr = prev_ptr + 1;
-
-        void **block1_prev = *prev_ptr;
-        void **block1_next;
-        if (block1_prev == mem_heap_lo())
-            block1_next = block1_prev;
-        else
-            block1_next = block1_prev + 1;
-
-        void **block2_next = *next_ptr;
-        void **block2_prev = *next_ptr - 1;
-        
-        *block1_next = block2_next;
-        if (*next_ptr != NULL)
-            *block2_prev = block1_prev;
-
-        size_t *header = (size_t*)((char*)best_ptr - SIZE_T_SIZE);
-        *header = (*header & BITMASK);
-        size_t *footer = (size_t*)((char*)header + *header + SIZE_T_SIZE);
-        *footer = (*header & BITMASK);
-
-        return best_ptr;
+        return alloc_free_block(best_ptr, newsize);
     }
 
-    // Get the new memory
-    void *p = mem_sbrk(sizewheaders);
-
-    // Check if mm_sbrk is indicating failure
-    if (p == (void *)-1)
-	    return NULL;
-
-    // Header
-    *(size_t *)p = newsize;
-
-    // Footer - The char* cast ensures we are incrementing in bytes
-    size_t *f = (size_t*)((char*)p + newsize + SIZE_T_SIZE);
-    *f = newsize;
-
-    return (void *)((char *)p + SIZE_T_SIZE);
+    // Get new heap resources for allocation
+    return alloc_new_block(newsize);
 }
 
 /*
  * mm_free - Freeing a block does nothing.
  */
 void mm_free(void *ptr)
-{// Get header and footer
+{
+    printf("Free called : %p\n", ptr);
+
+    // Get header and footer
     size_t *header = (size_t*)((char*)ptr - SIZE_T_SIZE);
-    size_t *footer = (size_t*)((char*)ptr + *header);
+    size_t *footer = (size_t*)((char*)ptr + (*header & BITMASK));
 
     if ((*header & 1) == 1)
         // This block is already free
+        // We can corrupt the heap if the user calls this incorrectly, so we just do nothing
         return;
 
     // Set free flag in header
@@ -256,97 +225,10 @@ void mm_free(void *ptr)
     *footer = *footer | 1;
 
     // Coalesce
-    // Let us check before the current block
-    size_t *prev_foot = (size_t*)((char*)header - SIZE_T_SIZE); 
-    if ((void*)prev_foot > mem_heap_lo() && (*prev_foot & 1) == 1)
-    {
-        // free bit is set, let's do coalescing
-        // Calculate new size
-        // It will be our size + previous size + size of one header and one footer
-        // We also need to remember to filter the free bit out
-        // After we are done we reset the free bit
-        size_t new_size = ((*header & BITMASK) + (*prev_foot & BITMASK) + 2 * SIZE_T_SIZE) | 1;
-
-        // We then need to set header to the other blocks header
-        header = (size_t*)((char*)prev_foot - ((*prev_foot & BITMASK) + SIZE_T_SIZE));
-
-        // We need to splice the free list for the block we just consumed
-        // Pointer to previous's prev_ptr
-        void **prev_ptr = (void*)((char*)header + SIZE_T_SIZE);
-        // Pointer to nexts next_ptr
-        void **next_ptr = prev_ptr + 1;
-
-        // Find the block before this
-        void **block1_prev = *prev_ptr;
-        // If we are at the root node, there is no prev_ptr, account for this
-        void **block1_next;
-        if (block1_prev == mem_heap_lo())
-            block1_next = block1_prev;
-        else
-            block1_next = block1_prev + 1;
-
-        // The block after this
-        // next_ptr can point to 0; Then these won't be valid adresses
-        void **block2_next = *next_ptr;
-        void **block2_prev = block2_next - 1;
-
-        // Point block 1 to block 2
-        *block1_next = block2_next;
-        // Only point backwards if block2 is a real block
-        if (*next_ptr != NULL)
-            *block2_prev = block1_prev;
-
-        // We then set header and footer to the new size
-        // At this point the unused header and footer is still insize our new block.
-        // But because malloc doesn't make promises about the state of the memory, this doesn't matter.
-        *header = new_size;
-        *footer = new_size;
-    }
-
-    // Now we check after the current block
-    size_t *next_head = (size_t*)((char*)footer + SIZE_T_SIZE);
-    
-    // We have no global footer so we need to use a call to mem in order to check if we are oob.
-    if ((void*)next_head < mem_heap_hi() && (*next_head & 1) == 1)
-    {
-        // Coalesce, same as before
-        size_t new_size = ((*header & BITMASK) + (*next_head & BITMASK) + 2 * SIZE_T_SIZE) | 1;
-
-        footer = (size_t*)((char*)next_head + (*next_head & BITMASK) - SIZE_T_SIZE);
-
-        void **prev_ptr = (void*)((char*)next_head + SIZE_T_SIZE);
-        // Pointer to nexts next_ptr
-        void **next_ptr = prev_ptr + 1;
-
-        void **block1_prev = *prev_ptr;
-        void **block1_next;
-        if (block1_prev == mem_heap_lo())
-            block1_next = block1_prev;
-        else
-            block1_next = block1_prev + 1;
-
-        void **block2_next = *next_ptr;
-        void **block2_prev = *next_ptr - 1;
-
-        *block1_next = block2_next;
-        
-        if (*next_ptr != NULL)
-            *block2_prev = block1_prev;
-
-        *header = new_size;
-        *footer = new_size;
-    }
+    header = coalesce(header, footer);
 
     // Add ourselves to the top of the list
-    // Get the spot for our ptrs
-    void **prev_ptr = (void*)((char*)header + SIZE_T_SIZE);
-    void **next_ptr = prev_ptr + 1;
-
-    void **root = mem_heap_lo();
-
-    *next_ptr = *root;
-    *prev_ptr = root;
-    *root = next_ptr;
+    FL_push_front(header);
 }
 
 /*
@@ -354,6 +236,7 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
+    printf("Realloc called\n");
     void *oldptr = ptr;
     void *newptr;
     size_t copySize;
@@ -369,8 +252,288 @@ void *mm_realloc(void *ptr, size_t size)
     return newptr;
 }
 
+
+/*
+ * ========================================================
+ *                  Static Helper functions
+ * ========================================================
+ */
+
+static void* alloc_new_block(size_t newsize)
+{
+    // Get the size required to also fit headers    
+    size_t sizewheaders = newsize + 2 * SIZE_T_SIZE;
+
+    // Get the new memory from sbrk
+    void *p = mem_sbrk(sizewheaders);
+
+    printf("Allocating new memory : %d\n", mem_heapsize());
+
+    // Check if mm_sbrk is indicating failure
+    if (p == (void *)-1)
+	    return NULL;
+
+    // Set the header
+    *(size_t *)p = newsize;
+
+    // Find the footer location and set the footer as well
+    size_t *footer = (size_t*)((char*)p + newsize + SIZE_T_SIZE);
+    *footer = newsize;
+
+    // printf("New %p : %p\n", (char*)p + SIZE_T_SIZE, mem_heap_hi());
+
+    // Return a pointer to the new memory area
+    return (void *)((char *)p + SIZE_T_SIZE);
+}
+
+static void* look_for_free_block(size_t newsize)
+{
+    // Initialize variables
+    size_t best_diff = __INT_MAX__;
+    void *best_ptr = NULL;
+    int index = 0;
+
+    // Find the root ptr
+    void **current = mem_heap_lo();
+
+    // Skip moce to first item in list
+    current = *current;
+
+    // Look through the list
+    while (current != NULL)
+    {
+        // DEBUG Check
+        if ((*(size_t*)((char*)current - (SIZE_T_SIZE + 4)) & 1) == 0)
+            printf("Non free block in free list\n");
+
+        // Get the size of the current free block
+        size_t this_size = (*(size_t*)((char*)current - (SIZE_T_SIZE + 4))) & BITMASK;
+
+        printf("Current -> %p : %d\n", current, this_size);
+        // printf("checking %p => %p\n", current, *current);
+        
+        // If it is large enough check if it is better than current best fit
+        if (newsize <= this_size && (this_size - newsize) < best_diff)
+        {
+            // If it is, then it is our new best fit
+            best_diff = this_size - newsize;
+            best_ptr = (void*)((char*)current - 4);
+        }
+
+        // If there is an exact match, no point continuing the loop
+        if (best_diff == 0)
+            break;
+
+        // Move along the list
+        current = *current;
+
+        // Limit the time spend in this loop for very long lists
+        // Sacrifice some fragmentation to get better speed
+        // Was also helpful during debugging, as corruption would sometimes cause loops in the free list
+        index++;
+        if (index > 1024)
+            break;
+    }
+
+    return best_ptr;
+}
+
+static void* split_free_block(size_t *header, size_t newsize)
+{   
+    // Get size of the block we are splitting off
+    // ie. the size of the original block - the size of the block we are allocating - space for two new header at the border
+    size_t size_new = *header - newsize - (2 * SIZE_T_SIZE);
+
+    // printf("Splitting block of size %d into blocks of size %d and %d\n", *header, newsize, size_new);
+
+    // Find location of new footer
+    size_t *footer = (size_t*)((char*)header + newsize + SIZE_T_SIZE);
+
+    // Set header and footer to new size
+    *header = newsize;
+    *footer = newsize;
+
+    // Get new_header and new_footer of the new free block that we are splitting off
+    size_t *new_header = (size_t*)((char*)footer + SIZE_T_SIZE);
+    size_t *new_footer = (size_t*)((char*)new_header + size_new + SIZE_T_SIZE);
+
+    // printf("%p = %d\n", (char*)new_header+SIZE_T_SIZE+4, *new_header & 1);
+
+    // Set them to the new size and set their free bit
+    *new_header = size_new | 1;
+    *new_footer = size_new | 1;
+
+    // Add the new split off block to beginning of free list
+    // printf("Split block. New blocks at %p and %p\n", (char*)best_ptr+4, (char*)new_header+SIZE_T_SIZE+4);
+    FL_push_front(new_header);
+
+    printf("Splitting\n");
+
+    // Return pointer to the allocated memory area
+    return (void*)((char*)header + SIZE_T_SIZE);
+}
+
+static void* alloc_free_block(void *best_ptr, size_t newsize)
+{
+    // Get the free list pointers, so we can do splicing
+    void **prev_ptr = best_ptr;
+    void **next_ptr = prev_ptr + 1;
+
+    // Remove this block from the free list
+    splice_list(prev_ptr, next_ptr);
+    
+    // Find header location and unset the free bit
+    size_t *header = (size_t*)((char*)best_ptr - SIZE_T_SIZE);
+    *header = (*header & BITMASK);
+
+    if ((*header - newsize) > 32)
+    {
+        // If there is enough left over after this block to make another block perform a split
+        return split_free_block(header, newsize);
+    }
+
+    // If we aren't doing splittng just unset the free bit in the footer
+    size_t *footer = (size_t*)((char*)header + *header + SIZE_T_SIZE);
+    *footer = (*header & BITMASK);
+
+    printf("Using whole free block\n");
+    return best_ptr;
+}
+
+/*
+ * Splices the list, so that the current block is removed from the free list
+ */
+static void splice_list(void **prev_ptr, void** next_ptr)
+{   
+    // Get the block before current in free list
+    void **block1_prev = *prev_ptr;
+    // If we are at the root node, there is no block1_prev, account for this
+    void **block1_next;
+    if (block1_prev == mem_heap_lo())
+        block1_next = block1_prev;
+    else
+        block1_next = block1_prev + 1;
+
+    // The block after this in free list
+    // next_ptr can point to NULL if this is the last block in the list; Then these won't be valid adresses
+    void **block2_next = *next_ptr;
+    void **block2_prev = block2_next - 1;
+
+    // Point block 1 to block 2
+    *block1_next = block2_next;
+
+    printf("Setting block1 %p => block2 %p\n", block1_next, block2_next);
+
+    // Only point backwards if block2 is not pointing to NULL
+    if (*next_ptr != NULL)
+        *block2_prev = block1_prev;
+
+    printf("Just spliced %p : ", next_ptr);
+    printfreelist();
+}
+
+static size_t* coalesce(size_t *header, size_t *footer)
+{
+    // Let us check before the current block
+    size_t *prev_foot = (size_t*)((char*)header - SIZE_T_SIZE); 
+    if ((void*)prev_foot > mem_heap_lo() && (*prev_foot & 1) == 1)
+    {
+        // free bit is set, let's do coalescing
+        // Calculate new size
+        // It will be our size + previous size + size of one header and one footer
+        // We also need to remember to filter the free bit out
+        // After we are done we reset the free bit
+        size_t new_size = ((*header & BITMASK) + (*prev_foot & BITMASK) + 2 * SIZE_T_SIZE) | 1;
+
+        // We then need to set header to the other blocks header
+        header = (size_t*)((char*)prev_foot - ((*prev_foot & BITMASK) + SIZE_T_SIZE));
+        printf("Coalesce behind %p => %d\n", header, new_size);
+
+        // We need to splice the free list for the block we just consumed
+        // Pointer to previous's prev_ptr
+        void **prev_ptr = (void*)((char*)header + SIZE_T_SIZE);
+        // Pointer to nexts next_ptr
+        void **next_ptr = prev_ptr + 1;
+
+        // Remove this block from the free list
+        splice_list(prev_ptr, next_ptr);
+
+        // We then set header and footer to the new size
+        // At this point the unused header and footer is still insize our new block.
+        // But because malloc doesn't make promises about the state of the memory, this doesn't matter.
+        *header = new_size;
+        *footer = new_size;
+    }
+
+    // Now we check after the current block
+    size_t *next_head = (size_t*)((char*)footer + SIZE_T_SIZE);
+    
+    // printf("CAhaed candidate %p = %d | %p\n", next_head, *next_head, mem_heap_hi());
+
+    // We have no global footer so we need to use a call to mem in order to check if we are oob.
+    if ((void*)next_head < mem_heap_hi() && (*next_head & 1) == 1)
+    {
+        // Coalesce, same as before
+        size_t new_size = ((*header & BITMASK) + (*next_head & BITMASK) + 2 * SIZE_T_SIZE) | 1;
+
+        footer = (size_t*)((char*)next_head + (*next_head & BITMASK) - SIZE_T_SIZE);
+        printf("Coalesce ahead %p => %d\n", next_head, new_size);
+
+        void **prev_ptr = (void*)((char*)next_head + SIZE_T_SIZE);
+        // Pointer to nexts next_ptr
+        void **next_ptr = prev_ptr + 1;
+
+        // Remove this block from the free list
+        splice_list(prev_ptr, next_ptr);
+
+        *header = new_size;
+        *footer = new_size;
+    }
+
+    return header;
+}
+
+static void FL_push_front(size_t *header)
+{
+    // Get the spot for our ptrs
+    void **prev_ptr = (void*)((char*)header + SIZE_T_SIZE);
+    void **next_ptr = prev_ptr + 1;
+
+    // Get the root pointer
+    void **root = mem_heap_lo();
+
+    // Add this block to beginning of list.
+    // We point to the previous first block
+    *next_ptr = *root;
+    // printf("next @ %p = %p\n", next_ptr, *next_ptr);
+    *prev_ptr = root;
+    // printf("prev @ %p = %p\n", prev_ptr, *prev_ptr);
+    *root = next_ptr;
+    // printf("root @ %p = %p\n", root, *root);
+
+    // The next blocs prev_ptr should point to us
+    // Unless are the last block, and our next_ptr is NULL
+    if (*next_ptr != NULL)
+    {
+        void **other_prev = (void*)((char*)*next_ptr - 4);
+        *other_prev = prev_ptr;
+    }
+
+    printf("Just pushed %p : ", next_ptr);
+    printfreelist();
+}
+
+
+
+
+
+
+
+
+
 static int mm_checker(void)
 {
+    printf("Checking!\n");
     if (checkCoalseceAndFree() == 0){
         return 0;
     }
