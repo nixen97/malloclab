@@ -173,23 +173,97 @@ void mm_free(void *ptr)
 } 
 
 /*
- * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
+ * mm_realloc - Split into 4 distinct behaviours
+ * 
+ * (1) - As malloc
+ *      If ptr is NULL, mm_realloc will simply call mm_malloc and pass the result along.
+ *      Required operation is identical, so no point in reinventing the wheel
+ * 
+ * (2) - As free
+ *      If size is 0, we call mm_free on ptr. Same rationale as (1).
+ * 
+ * (3) - Shrinking
+ *      If the desired size is smaller than the current size, the block can be shrunk in place.
+ *      If the difference is larger than 32 (larger enough for header, footer and prev, next ptrs) a free block will be split off.
+ *      If not, we do nothing and simply return the ptr unchanged.
+ * 
+ * (4) - Reallocating
+ *      We allocate a new block with mm_malloc and copy the content.
+ *      The old block is then freed.
+ *      An optimization here would be to do coalescing with sorrounding free blocks.
+ *      Coalescing forwards would in this case save the memcpy. And it would lead to less fragmentation.
+ *      THIS IS NOT CURRENTLY IMPLEMENTED!
+ * 
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    // printf("Realloc called\n");
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
+    /*
+     * -----------------------------------------------------------------------
+     * | Behaviour 1 (As malloc): Check is ptr is NULL then just call malloc |
+     * -----------------------------------------------------------------------
+     */
+    if (ptr == NULL)
+        return mm_malloc(size);
+
+    /*
+     * ------------------------------------------------------------
+     * | Behaviour 2 (As free): If size is 0, than just free ptr. |
+     * ------------------------------------------------------------
+     */
+
+    if (size == 0)
+    {
+        mm_free(ptr);
+        return NULL;
+    }
+
+    /*
+     * ----------------------------------------------------------------------------------------------------
+     * | Behaviour 3 (Shrinking): If the new size is smaller than shrink the block in place. Maybe split. |
+     * ----------------------------------------------------------------------------------------------------
+     */
+
+    // Find the header of the current block
+    size_t* header = (size_t*)((char*)ptr - SIZE_T_SIZE);
+
+    // Get the current size of the block
+    size_t current_size = *header;
+
+    // If desired size is smaller than current size, shrink in place
+    if (current_size > size)
+    {
+        // If size so much smaller that we can split a free block off, do this.
+        if ((current_size - ALIGN(size)) > 32)
+        {
+            // Perform a split
+            // split_free_block shrinks the block and gives us a ptr back we can return directly
+            return split_free_block(header, ALIGN(size));
+        }
+        
+        // If the reduction is too small to split off, we must simply live with the fragmentation and return the block unchanged.
+        return ptr;
+    }
+
+    /*
+     * --------------------------------------------------------------------------
+     * | Behaviour 4 (Reallocation): Allocate a new block and move the content. |
+     * --------------------------------------------------------------------------
+     */
     
-    newptr = mm_malloc(size);
+    // Get a new block of memory
+    void* newptr = mm_malloc(size);
+
+    // Guard against an error in malloc
     if (newptr == NULL)
-      return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
+        return NULL;
+
+    // If we have come this far, the new block must be at least the current size, and so we can copy directly
+    memcpy(newptr, ptr, current_size);
+
+    // The old block can now be freed
+    mm_free(ptr);
+
+    // And the ptr to the new are is returned
     return newptr;
 }
 
